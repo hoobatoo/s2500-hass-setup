@@ -144,6 +144,7 @@ Before proceeding with authentication setup, you must enable bypass mode on the 
    - Retype Passphrase: *leave blank*
    - Certificate Format: Select **PEM** from drop-down menu
    - Certificate Type: Select **Public Cert** from drop-down menu
+     
    ![enter image description here](https://i.imgur.com/adsraiH.png)
 
 5. Click the **Upload** button
