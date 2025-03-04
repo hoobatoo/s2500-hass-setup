@@ -1,0 +1,223 @@
+#!/usr/bin/expect -f
+
+# aruba_poe.exp - Manage PoE ports on Aruba S2500 switch using expect
+# Version: 1.2.0
+# Usage: aruba_poe.exp <port_number> <enable|disable|status>
+#
+# Version History:
+# v1.2.0 (2025-03-03) - Remove debug mode
+#   - Removed debug flag and all debug output
+#   - Streamlined code for cleaner operation
+# v1.1.0 (2025-03-03) - Complete rewrite of status handling
+#   - Simplified file-based approach with a single output file
+#   - More robust file handling and error recovery
+#   - Added file permissions handling
+# v1.0.9 (2025-03-03) - Fix status output file reading
+#   - Ensure status is read from the clean output file
+#   - Improve file handling in non-debug mode
+# v1.0.8 (2025-03-03) - File-based status output processing
+#   - Store raw status output in temporary file in /config/www
+#   - Process and store cleaned output in separate file
+#   - Return cleaned output from file
+# v1.0.7 (2025-03-03) - Simple direct capture approach
+#   - Completely new, simpler approach
+#   - Separate SSH sessions for status vs configuration
+# v1.0.6 (2025-03-03) - Fix switch prompt output issue
+#   - Complete rewrite of status output handling
+#   - Added special marker for status lines
+# v1.0.5 (2025-03-03) - Targeted status line capture
+#   - Focus solely on capturing the single status line
+#   - Simplified pattern matching based on specific output format
+# v1.0.4 (2025-03-03) - Complete rewrite of status command
+#   - Fixed status command pattern matching
+#   - Added explicit delays to ensure proper order of operations
+# v1.0.3 (2025-03-03) - Debug flag and simplified status
+#   - Added debug flag support
+#   - Simplified status command approach
+# v1.0.2 (2025-03-03) - Fix status command output
+#   - Improved pattern matching for status command
+#   - Added more reliable output method
+# v1.0.1 (2025-03-03) - Fix debug output
+#   - Ensure log_user 0 is active to suppress SSH session output
+#   - Better capture and control of final output
+# v1.0.0 (2025-03-03) - Initial versioned release
+#   - Based on working script with improved status handling
+#   - Added version information
+#   - Better error messaging including version number
+
+# Script version
+set script_version "1.2.0"
+
+# Suppress terminal output
+log_user 0
+
+# Set timeout for expect commands (in seconds)
+set timeout 10
+
+# Check if required arguments are provided
+if {$argc < 2} {
+    puts "aruba_poe.exp v$script_version - Usage: $argv0 <port_number> <enable|disable|status>"
+    exit 1
+}
+
+# Get arguments
+set port [lindex $argv 0]
+set action [lindex $argv 1]
+
+# Validate port number
+if {![string is integer -strict $port] || $port < 0 || $port > 24} {
+    puts "Error (v$script_version): Port must be a number between 0 and 24"
+    exit 1
+}
+
+# Validate action
+if {$action != "enable" && $action != "disable" && $action != "status"} {
+    puts "Error (v$script_version): Action must be 'enable', 'disable', or 'status'"
+    exit 1
+}
+
+# Handle status action
+if {$action == "status"} {
+    # Define a single file for status output
+    set status_file "/config/www/poe_status_port_$port.txt"
+    
+    # Remove the old status file if it exists to start fresh
+    if {[file exists $status_file]} {
+        file delete -force $status_file
+    }
+    
+    # Default message in case SSH fails
+    set default_message "No status information found for port $port"
+    
+    # Create the status file with default message first
+    if {[catch {
+        set fp [open $status_file w]
+        puts $fp $default_message
+        close $fp
+    } err]} {
+        # Continue even if file creation fails
+    }
+    
+    # Try to make the file world-readable
+    catch {exec chmod 644 $status_file}
+    
+    # Start SSH session
+    if {[catch {
+        spawn ssh -F /config/.ssh/config 192.168.1.80
+        
+        # Wait for prompt
+        expect {
+            timeout {puts "Error (v$script_version): Timeout waiting for login prompt"; exit 1}
+            "password:" {
+                puts "Error (v$script_version): SSH requires password authentication, which isn't handled by this script"
+                exit 1
+            }
+            "Permission denied" {puts "Error (v$script_version): SSH authentication failed"; exit 1}
+            "No route to host" {puts "Error (v$script_version): Could not connect to host"; exit 1}
+            "Connection refused" {puts "Error (v$script_version): Connection refused by host"; exit 1}
+            -re {[>#]} 
+        }
+        
+        # Send status command
+        send "show poe interface gigabitethernet 0/0/$port | include GE\r"
+        
+        # Initialize status variable
+        set status_line ""
+        
+        # Capture result
+        expect {
+            timeout {}
+            -re {\r\n(GE\S+:.*)} {
+                set status_line $expect_out(1,string)
+            }
+            -re {\n(GE\S+:.*)} {
+                set status_line $expect_out(1,string)
+            }
+        }
+        
+        # Wait for prompt
+        expect -re {[>#]}
+        
+        # Exit SSH session
+        send "exit\r"
+        expect eof
+        
+        # Write the status to file if we found one
+        if {$status_line != ""} {
+            set fp [open $status_file w]
+            puts $fp $status_line
+            close $fp
+            
+            # Try to make the file world-readable again
+            catch {exec chmod 644 $status_file}
+        }
+    } err]} {
+        # Continue even if SSH fails
+    }
+    
+    # Read the status from file (this happens regardless of SSH success)
+    if {[catch {
+        set fp [open $status_file r]
+        set final_status [read $fp]
+        close $fp
+        set final_status [string trim $final_status]
+        
+        # Print the status from the file
+        puts $final_status
+    } err]} {
+        puts $default_message
+    }
+    
+    exit 0
+}
+
+# Determine the command based on the action for enable/disable
+if {$action == "enable"} {
+    set poe_cmd "enable-poe"
+} else {
+    set poe_cmd "disable-poe"
+}
+
+# Start SSH session
+spawn ssh -F /config/.ssh/config 192.168.1.80
+
+# Wait for prompt
+expect {
+    timeout {puts "Error (v$script_version): Timeout waiting for login prompt"; exit 1}
+    "password:" {
+        puts "Error (v$script_version): SSH requires password authentication, which isn't handled by this script"
+        exit 1
+    }
+    "Permission denied" {puts "Error (v$script_version): SSH authentication failed"; exit 1}
+    "No route to host" {puts "Error (v$script_version): Could not connect to host"; exit 1}
+    "Connection refused" {puts "Error (v$script_version): Connection refused by host"; exit 1}
+    -re {[>#]} 
+}
+
+# Enter configuration mode
+send "configure terminal\r"
+expect {
+    timeout {puts "Error (v$script_version): Timeout waiting for config prompt"; exit 1}
+    -re {[>#\(config\)]} {
+        # Send PoE command
+        send "interface gigabitethernet 0/0/$port poe-profile $poe_cmd\r"
+        expect {
+            timeout {puts "Error (v$script_version): Timeout waiting for command completion"; exit 1}
+            "Invalid" {puts "Error (v$script_version): Invalid command or port"; exit 1}
+            "Error" {puts "Error (v$script_version): Error executing command"; exit 1}
+            -re {[>#\(config\)]}
+        }
+    }
+}
+
+# Exit configuration mode
+send "exit\r"
+expect -re {[>#]}
+
+# Exit SSH session
+send "exit\r"
+expect eof
+
+# Print clean success message
+puts "Successfully ${action}d PoE on port $port (v$script_version)"
+exit 0
